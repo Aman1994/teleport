@@ -19,14 +19,18 @@ package client
 import (
 	"compress/gzip"
 	"context"
+	"crypto/rand"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"io"
+	"math/big"
 	"net"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/gravitational/teleport/api/breaker"
 	"github.com/gravitational/teleport/api/client/proto"
 	"github.com/gravitational/teleport/api/constants"
 	"github.com/gravitational/teleport/api/defaults"
@@ -40,10 +44,13 @@ import (
 	"github.com/gravitational/trace/trail"
 	"golang.org/x/crypto/ssh"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/connectivity"
 	"google.golang.org/grpc/credentials"
 	ggzip "google.golang.org/grpc/encoding/gzip"
+	"google.golang.org/grpc/grpclog"
 	"google.golang.org/grpc/keepalive"
+	"google.golang.org/grpc/status"
 )
 
 func init() {
@@ -71,9 +78,14 @@ type Client struct {
 	conn *grpc.ClientConn
 	// grpc is the gRPC client specification for the auth server.
 	grpc proto.AuthServiceClient
-	// closedFlag is set to indicate that the connnection is closed.
+	// closedFlag is set to indicate that the connection is closed.
 	// It's a pointer to allow the Client struct to be copied.
 	closedFlag *int32
+	// closedCh indicates to the random disconnect loop that the connection
+	// has been closed and to terminate
+	closedCh chan struct{}
+	// reconnectCh indicates that the gRPC conn was reconnected. used in tests
+	reconnectCh chan struct{}
 	// callOpts configure calls made by this client.
 	callOpts []grpc.CallOption
 }
@@ -93,6 +105,15 @@ func New(ctx context.Context, cfg Config) (clt *Client, err error) {
 		return nil, trace.Wrap(err)
 	}
 
+	// If the Client was created successfully, lets monitor it for long-lived connections
+	defer func() {
+		if err != nil {
+			return
+		}
+
+		go randomlyReconnectLongLivedConnection(clt, defaults.LongLivedConnection, reconnectPercent)
+	}()
+
 	// If cfg.DialInBackground is true, only a single connection is attempted.
 	// This option is primarily meant for internal use where the client has
 	// direct access to server values that guarantee a successful connection.
@@ -102,13 +123,60 @@ func New(ctx context.Context, cfg Config) (clt *Client, err error) {
 	return connect(ctx, cfg)
 }
 
+var (
+	// max defines the upper limit to the random number generated in randomlyReconnectLongLivedConnection.
+	// 101 was chosen to include all numbers [0-100]
+	max              = big.NewInt(101)
+	reconnectPercent = big.NewInt(defaults.ReconnectPercent)
+)
+
+// randomlyReconnectLongLivedConnection randomly reconnects long-lived Clients.
+// Due to the stickiness of gRPC connections it can be impossible to spread load
+// among servers. To get around this we can reconnect a random percentage of all
+// Clients that are connected for > randomReconnectInterval.
+func randomlyReconnectLongLivedConnection(clt *Client, interval time.Duration, percentage *big.Int) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		// connection is long-lived, roll the dice to see if it is time to reconnect
+		case <-ticker.C:
+			// generate a random number [0-100]
+			n, err := rand.Int(rand.Reader, max)
+			if err != nil {
+				continue
+			}
+
+			// check if our number is less than or equal to reconnect percentage
+			if n.Cmp(percentage) <= 0 {
+				continue
+			}
+
+			grpclog.Infoln("[random-disconnect] reconnecting long lived connection")
+			clt.reconnect()
+
+			// notify reconnect channel that we reconnected
+			select {
+			case clt.reconnectCh <- struct{}{}:
+			default:
+			}
+		// connection was closed, time to exit
+		case <-clt.closedCh:
+			return
+		}
+	}
+}
+
 // newClient constructs a new client.
 func newClient(cfg Config, dialer ContextDialer, tlsConfig *tls.Config) *Client {
 	return &Client{
-		c:          cfg,
-		dialer:     dialer,
-		tlsConfig:  ConfigureALPN(tlsConfig, cfg.ALPNSNIAuthDialClusterName),
-		closedFlag: new(int32),
+		c:           cfg,
+		dialer:      dialer,
+		tlsConfig:   ConfigureALPN(tlsConfig, cfg.ALPNSNIAuthDialClusterName),
+		closedFlag:  new(int32),
+		closedCh:    make(chan struct{}, 1),
+		reconnectCh: make(chan struct{}),
 	}
 }
 
@@ -348,23 +416,54 @@ func dialerConnect(ctx context.Context, params connectParams) (*Client, error) {
 	return clt, nil
 }
 
+// reconnect closes the underlying gRPC conn and redials the auth server
+// using the same configuration that was used to establish the original conn.
+func (c *Client) reconnect() {
+	if c.isClosed() {
+		return
+	}
+
+	addr := c.conn.Target()
+	if err := c.conn.Close(); err != nil {
+		return
+	}
+
+	if err := c.dialGRPC(context.Background(), addr); err != nil {
+		grpclog.Infof("[random-disconnect] failed to reconnect to client: %v", err)
+	}
+
+	grpclog.Infoln("[random-disconnect] client was reconnected")
+}
+
 // dialGRPC dials a connection between server and client.
 func (c *Client) dialGRPC(ctx context.Context, addr string) error {
 	dialContext, cancel := context.WithTimeout(ctx, c.c.DialTimeout)
 	defer cancel()
 
+	cb, err := breaker.New(c.c.BreakerConfig)
+	if err != nil {
+		return err
+	}
+
 	dialOpts := append([]grpc.DialOption{}, c.c.DialOpts...)
 	dialOpts = append(dialOpts, grpc.WithContextDialer(c.grpcDialer()))
 	dialOpts = append(dialOpts,
-		grpc.WithUnaryInterceptor(metadata.UnaryClientInterceptor),
-		grpc.WithStreamInterceptor(metadata.StreamClientInterceptor))
+		grpc.WithChainUnaryInterceptor(
+			metadata.UnaryClientInterceptor,
+			breaker.UnaryClientInterceptor(cb),
+		),
+		grpc.WithChainStreamInterceptor(
+			metadata.StreamClientInterceptor,
+			breaker.StreamClientInterceptor(cb),
+		),
+	)
 	// Only set transportCredentials if tlsConfig is set. This makes it possible
-	// to explicitly provide gprc.WithInsecure in the client's dial options.
+	// to explicitly provide grpc.WithTransportCredentials(insecure.NewCredentials())
+	// in the client's dial options.
 	if c.tlsConfig != nil {
 		dialOpts = append(dialOpts, grpc.WithTransportCredentials(credentials.NewTLS(c.tlsConfig)))
 	}
 
-	var err error
 	if c.conn, err = grpc.DialContext(dialContext, addr, dialOpts...); err != nil {
 		return trace.Wrap(err)
 	}
@@ -407,6 +506,9 @@ func (c *Client) grpcDialer() func(ctx context.Context, addr string) (net.Conn, 
 // alongside the DialInBackground client config option to wait until background dialing has completed.
 func (c *Client) waitForConnectionReady(ctx context.Context) error {
 	for {
+		if c.conn == nil {
+			return errors.New("conn already closed")
+		}
 		switch state := c.conn.GetState(); state {
 		case connectivity.Ready:
 			return nil
@@ -454,6 +556,24 @@ type Config struct {
 	// ALPNSNIAuthDialClusterName if present the client will include ALPN SNI routing information in TLS Hello message
 	// allowing to dial auth service through Teleport Proxy directly without using SSH Tunnels.
 	ALPNSNIAuthDialClusterName string
+	// BreakerConfig specifies the CircuitBreaker configuration to be used.
+	BreakerConfig breaker.Config
+}
+
+// isSuccess determines whether the error provided should be ignored by the circuit breaker. This is
+// the default IsSuccessful value of Config.BreakerConfig if one is not provided.
+func isSuccess(err error) bool {
+	code := status.Code(err)
+	switch {
+	case err == nil:
+		return true
+	case errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded):
+		return false
+	case code == codes.Canceled || code == codes.Unknown || code == codes.Unavailable || code == codes.DeadlineExceeded:
+		return false
+	default:
+		return true
+	}
 }
 
 // CheckAndSetDefaults checks and sets default config values.
@@ -481,6 +601,26 @@ func (c *Config) CheckAndSetDefaults() error {
 		c.DialOpts = append(c.DialOpts, grpc.WithBlock())
 	}
 
+	if c.BreakerConfig.Interval <= 0 {
+		c.BreakerConfig.Interval = defaults.BreakerInterval
+	}
+
+	if c.BreakerConfig.RecoveryLimit <= 0 {
+		c.BreakerConfig.RecoveryLimit = defaults.RecoveryLimit
+	}
+
+	if c.BreakerConfig.Trip == nil {
+		c.BreakerConfig.Trip = breaker.ConsecutiveFailureTripper(5)
+	}
+
+	if c.BreakerConfig.IsSuccessful == nil {
+		c.BreakerConfig.IsSuccessful = isSuccess
+	}
+
+	if err := c.BreakerConfig.CheckAndSetDefaults(); err != nil {
+		return err
+	}
+
 	return nil
 }
 
@@ -504,6 +644,7 @@ func (c *Client) Close() error {
 	if c.setClosed() && c.conn != nil {
 		err := c.conn.Close()
 		c.conn = nil
+		c.closedCh <- struct{}{}
 		return trace.Wrap(err)
 	}
 	return nil
