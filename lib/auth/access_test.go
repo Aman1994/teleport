@@ -18,6 +18,7 @@ package auth
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	"github.com/gravitational/trace"
@@ -56,8 +57,10 @@ func TestUpsertDeleteRoleEventsEmitted(t *testing.T) {
 	p.mockEmitter.Reset()
 
 	// Deleting a role should emit a RoleDeletedEvent.
+	fmt.Println("Are you broken?")
 	err = p.a.DeleteRole(ctx, role.GetName())
 	require.NoError(t, err)
+	fmt.Println("??????")
 	require.Equal(t, p.mockEmitter.LastEvent().GetType(), events.RoleDeletedEvent)
 	require.Equal(t, p.mockEmitter.LastEvent().(*apievents.RoleDelete).Name, role.GetName())
 	p.mockEmitter.Reset()

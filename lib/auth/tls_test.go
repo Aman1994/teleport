@@ -2622,7 +2622,6 @@ func (s *TLSSuite) TestChangeUserAuthentication(c *check.C) {
 
 	_, _, err = CreateUserAndRole(clt, username, []string{"role1"})
 	c.Assert(err, check.IsNil)
-
 	token, err := s.server.Auth().CreateResetPasswordToken(ctx, CreateUserTokenRequest{
 		Name: username,
 		TTL:  time.Hour,
