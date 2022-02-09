@@ -330,6 +330,13 @@ func NewWindowsService(cfg WindowsServiceConfig) (*WindowsService, error) {
 		close:       close,
 	}
 
+	ok := false
+	defer func() {
+		if !ok {
+			s.Close()
+		}
+	}()
+
 	// run LDAP initialization in a retry loop - this prevents the service
 	// from crashing and taking the entire Teleport process with it if
 	// we cannot connect to LDAP
@@ -340,7 +347,6 @@ func NewWindowsService(cfg WindowsServiceConfig) (*WindowsService, error) {
 		Clock: s.cfg.Clock,
 	})
 	if err != nil {
-		s.Close()
 		return nil, trace.Wrap(err)
 	}
 	go func() {
@@ -351,30 +357,25 @@ func NewWindowsService(cfg WindowsServiceConfig) (*WindowsService, error) {
 
 	recConfig, err := s.cfg.AccessPoint.GetSessionRecordingConfig(s.closeCtx)
 	if err != nil {
-		s.Close()
 		return nil, trace.Wrap(err)
 	}
 
 	streamer, err := s.newStreamer(s.closeCtx, recConfig)
 	if err != nil {
-		s.Close()
 		return nil, trace.Wrap(err)
 	}
 	s.streamer = streamer
 
 	if err := s.startServiceHeartbeat(); err != nil {
-		s.Close()
 		return nil, trace.Wrap(err)
 	}
 
 	if err := s.startStaticHostHeartbeats(); err != nil {
-		s.Close()
 		return nil, trace.Wrap(err)
 	}
 
 	if len(s.cfg.DiscoveryBaseDN) > 0 {
 		if err := s.startDesktopDiscovery(); err != nil {
-			s.Close()
 			return nil, trace.Wrap(err)
 		}
 	} else if len(s.cfg.Heartbeat.StaticHosts) == 0 {
@@ -383,6 +384,7 @@ func NewWindowsService(cfg WindowsServiceConfig) (*WindowsService, error) {
 		s.cfg.Log.Infoln("desktop discovery via LDAP is disabled, set 'base_dn' to enable")
 	}
 
+	ok = true
 	return s, nil
 }
 
@@ -728,6 +730,10 @@ func (s *WindowsService) connectRDP(ctx context.Context, log logrus.FieldLogger,
 		return trace.Wrap(err)
 	}
 
+	// Closing the stream writer is needed to flush all recorded data
+	// and trigger the upload. Do it in a goroutine since depending on
+	// the session size it can take a while, and we don't want to block
+	// the client.
 	defer func() {
 		go func() {
 			if err := sw.Close(context.Background()); err != nil {
@@ -772,7 +778,7 @@ func (s *WindowsService) connectRDP(ctx context.Context, log logrus.FieldLogger,
 	}
 	tdpConn.OnRecv = func(m tdp.Message) {
 		switch m.(type) {
-		// TODO: tdp.ClipboardData
+		// TODO(zmb3): record audit events for clipboard usage
 		case tdp.ClientScreenSpec, tdp.MouseButton, tdp.MouseMove:
 			b, err := m.Encode()
 			if err != nil {
