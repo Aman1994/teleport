@@ -81,7 +81,7 @@ spec:
     logins: [root, '{{internal.logins}}']
     # Windows logins a user is allowed to use for desktop sessions.
     windows_desktop_logins: [Administrator, '{{internal.logins}}']
-    # If kubernetes integration is enabled, this setting configures which 
+    # If kubernetes integration is enabled, this setting configures which
     # kubernetes groups the users of this role will be assigned to.
     # Note that you can refer to a SAML/OIDC trait via the "external" property bag.
     # This allows you to specify Kubernetes group membership in an identity manager:
@@ -185,10 +185,10 @@ Teleport provides several pre-defined roles out-of-the-box:
 | Role | Description |
 | --- | --- |
 | `editor` | Allows editing of cluster configuration settings. |
-| `auditor`| Allows reading cluster events, audit logs, and playing back session records. | 
+| `auditor`| Allows reading cluster events, audit logs, and playing back session records. |
 | `access`| Allows access to cluster resources. |
 
-<Details title="Version Warning: Before 8.0" opened={false}> 
+<Details title="Version Warning: Before 8.0" opened={false}>
 Teleport versions prior to 8.0 also included a default `admin` role. This role
 has been deprecated in favor of smaller, more fine-grained roles like the
 presets mentioned above.
@@ -334,9 +334,18 @@ who created the session.
 
 <Details title="Version Warning: Before 8.1" opened={false}>
 Teleport versions prior to 8.1 don't support the roles exemplified below.
-You may to create such roles after an upgrade, but in the event of a cluster
+You may create such roles after upgrading, but in the event of a cluster
 downgrade they will become invalid.
 </Details>
+
+<Admonition
+  type="warning"
+  title="Preset Auditor Role"
+>
+The preset `auditor` role allows access to all events, sessions, and session
+recordings. In order for the following roles to take effect you will need to
+ensure your user doesn't also have a more permissive role like `auditor`.
+</Admonition>
 
 Role for restricted access to session recordings:
 
