@@ -4,7 +4,6 @@
 package types
 
 import (
-	_ "github.com/gravitational/teleport/api/types/wrappers"
 	encoding_binary "encoding/binary"
 	fmt "fmt"
 	_ "github.com/gogo/protobuf/gogoproto"
@@ -12,6 +11,7 @@ import (
 	github_com_gogo_protobuf_types "github.com/gogo/protobuf/types"
 	_ "github.com/golang/protobuf/ptypes/timestamp"
 	github_com_gravitational_teleport_api_constants "github.com/gravitational/teleport/api/constants"
+	_ "github.com/gravitational/teleport/api/types/wrappers"
 	github_com_gravitational_teleport_api_types_wrappers "github.com/gravitational/teleport/api/types/wrappers"
 	io "io"
 	math "math"
