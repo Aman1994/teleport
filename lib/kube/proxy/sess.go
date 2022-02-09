@@ -833,54 +833,52 @@ func (s *session) join(p *party) error {
 		return trace.AccessDenied("The requested session is not active")
 	}
 
+	err := s.trackerAddParticipant(p)
+	if err != nil {
+		return trace.Wrap(err)
+	}
+
+	sessionJoinEvent := &apievents.SessionJoin{
+		Metadata: apievents.Metadata{
+			Type:        events.SessionJoinEvent,
+			Code:        events.SessionJoinCode,
+			ClusterName: s.ctx.teleportCluster.name,
+		},
+		KubernetesClusterMetadata: apievents.KubernetesClusterMetadata{
+			KubernetesCluster: s.ctx.kubeCluster,
+			KubernetesUsers:   []string{},
+			KubernetesGroups:  []string{},
+		},
+		SessionMetadata: apievents.SessionMetadata{
+			SessionID: s.id.String(),
+		},
+		UserMetadata: apievents.UserMetadata{
+			User:         p.Ctx.User.GetName(),
+			Login:        "root",
+			Impersonator: p.Ctx.Identity.GetIdentity().Impersonator,
+		},
+		ConnectionMetadata: apievents.ConnectionMetadata{
+			RemoteAddr: s.params.ByName("podName"),
+		},
+	}
+
+	if err := s.emitter.EmitAuditEvent(s.forwarder.ctx, sessionJoinEvent); err != nil {
+		s.forwarder.log.WithError(err).Warn("Failed to emit event.")
+	}
+
+	recentWrites := s.io.GetRecentHistory()
+	_, err = p.Client.stdoutStream().Write(recentWrites)
+	if err != nil {
+		s.log.Warnf("Failed to write history to client: %v.", err)
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	stringID := p.ID.String()
 	s.parties[p.ID] = p
 	s.partiesHistorical[p.ID] = p
 
-	go func() {
-		err := s.trackerAddParticipant(p)
-		if err != nil {
-			s.log.Warnf("Failed to update session tracker with new participant: %v.", err)
-		}
-
-		sessionJoinEvent := &apievents.SessionJoin{
-			Metadata: apievents.Metadata{
-				Type:        events.SessionJoinEvent,
-				Code:        events.SessionJoinCode,
-				ClusterName: s.ctx.teleportCluster.name,
-			},
-			KubernetesClusterMetadata: apievents.KubernetesClusterMetadata{
-				KubernetesCluster: s.ctx.kubeCluster,
-				KubernetesUsers:   []string{},
-				KubernetesGroups:  []string{},
-			},
-			SessionMetadata: apievents.SessionMetadata{
-				SessionID: s.id.String(),
-			},
-			UserMetadata: apievents.UserMetadata{
-				User:         p.Ctx.User.GetName(),
-				Login:        "root",
-				Impersonator: p.Ctx.Identity.GetIdentity().Impersonator,
-			},
-			ConnectionMetadata: apievents.ConnectionMetadata{
-				RemoteAddr: s.params.ByName("podName"),
-			},
-		}
-
-		if err := s.emitter.EmitAuditEvent(s.forwarder.ctx, sessionJoinEvent); err != nil {
-			s.forwarder.log.WithError(err).Warn("Failed to emit event.")
-		}
-
-		recentWrites := s.io.GetRecentHistory()
-		_, err = p.Client.stdoutStream().Write(recentWrites)
-		if err != nil {
-			s.log.Warnf("Failed to write history to client: %v.", err)
-		}
-
-		s.io.BroadcastMessage(fmt.Sprintf("User %v joined the session.", p.Ctx.User.GetName()))
-	}()
+	s.io.BroadcastMessage(fmt.Sprintf("User %v joined the session.", p.Ctx.User.GetName()))
 
 	if s.tty {
 		s.terminalSizeQueue.add(stringID, p.Client.resizeQueue())
