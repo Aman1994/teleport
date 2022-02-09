@@ -54,6 +54,9 @@ teleport:
     # List of CockroachDB nodes to connect to:
     nodes: ["172.17.0.1:26257", "172.17.0.2:26257", "172.17.0.3:26257"]
 
+	 # Set database where Teleport will store its data.
+	 database: "teleport"
+
     # Required path to TLS CA, client certificate, and client key files 
     # to connect to CockroachDB.
     #
