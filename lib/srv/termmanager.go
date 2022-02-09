@@ -66,9 +66,9 @@ func (g *TermManager) writeToClients(p []byte) int {
 	truncateFront := func(slice []byte, max int) []byte {
 		if len(slice) > max {
 			return slice[len(slice)-max:]
-		} else {
-			return slice
 		}
+
+		return slice
 	}
 
 	g.history = append(g.history, truncateFront(p, maxHistory)...)
