@@ -97,7 +97,8 @@ func createDesktopConnection(
 	//
 	// In the future, we may want to do something smarter like latency-based
 	// routing.
-	winDesktops, err := ctx.unsafeCachedAuthClient.GetWindowsDesktopsByName(r.Context(), desktopName)
+	winDesktops, err := ctx.unsafeCachedAuthClient.GetWindowsDesktops(r.Context(),
+		types.WindowsDesktopFilter{Name: desktopName})
 	if err != nil {
 		return trace.Wrap(err)
 	}

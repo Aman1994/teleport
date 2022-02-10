@@ -740,7 +740,8 @@ func (rc *ResourceCommand) Delete(client auth.ClientI) (err error) {
 		}
 		fmt.Printf("windows desktop service %q has been deleted\n", rc.ref.Name)
 	case types.KindWindowsDesktop:
-		desktops, err := client.GetWindowsDesktopsByName(ctx, rc.ref.Name)
+		desktops, err := client.GetWindowsDesktops(ctx,
+			types.WindowsDesktopFilter{Name: rc.ref.Name})
 		if err != nil {
 			return trace.Wrap(err)
 		}
@@ -1199,7 +1200,7 @@ func (rc *ResourceCommand) getCollection(client auth.ClientI) (ResourceCollectio
 		}
 		return &windowsDesktopServiceCollection{services: out}, nil
 	case types.KindWindowsDesktop:
-		desktops, err := client.GetWindowsDesktops(ctx)
+		desktops, err := client.GetWindowsDesktops(ctx, types.WindowsDesktopFilter{})
 		if err != nil {
 			return nil, trace.Wrap(err)
 		}
